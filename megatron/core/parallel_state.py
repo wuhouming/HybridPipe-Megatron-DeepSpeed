@@ -6,7 +6,7 @@ import torch
 from typing import Optional
 
 from .utils import GlobalMemoryBuffer
-
+from megatron import get_args
 # Intra-layer model parallel group that the current rank belongs to.
 _TENSOR_MODEL_PARALLEL_GROUP = None
 # Inter-layer model parallel group that the current rank belongs to.
@@ -272,7 +272,10 @@ def initialize_model_parallel(
         if len(ranks) > 1:
             embedding_ranks = [ranks[0], ranks[-1]]
             position_embedding_ranks = [ranks[0]]
+            if get_args().enable_bdv_schedule:
+                embedding_ranks = [ranks[0]]
             if pipeline_model_parallel_split_rank is not None:
+                assert not get_args().enable_bdv_schedule
                 if ranks[pipeline_model_parallel_split_rank] not in embedding_ranks:
                     embedding_ranks = [ranks[0], ranks[pipeline_model_parallel_split_rank], ranks[-1]]
                 if ranks[pipeline_model_parallel_split_rank] not in position_embedding_ranks:
@@ -555,6 +558,9 @@ def is_pipeline_last_stage(ignore_virtual=False):
     """Return True if in the last pipeline model-parallel stage, False otherwise."""
     if not ignore_virtual:
         virtual_pipeline_model_parallel_world_size = get_virtual_pipeline_model_parallel_world_size()
+        if get_args().enable_bdv_schedule:
+            assert virtual_pipeline_model_parallel_world_size == 2
+            return get_pipeline_model_parallel_rank() == 0 and get_virtual_pipeline_model_parallel_rank() == virtual_pipeline_model_parallel_world_size - 1
         if virtual_pipeline_model_parallel_world_size is not None and get_virtual_pipeline_model_parallel_rank() != (
             virtual_pipeline_model_parallel_world_size - 1
         ):
@@ -568,6 +574,8 @@ def is_rank_in_embedding_group(ignore_virtual=False):
     global _EMBEDDING_GLOBAL_RANKS
     if ignore_virtual:
         return rank in _EMBEDDING_GLOBAL_RANKS
+    if get_args().enable_bdv_schedule:
+        return is_pipeline_first_stage(ignore_virtual=False) or is_pipeline_last_stage(ignore_virtual=False)
     if rank in _EMBEDDING_GLOBAL_RANKS:
         if rank == _EMBEDDING_GLOBAL_RANKS[0]:
             return is_pipeline_first_stage(ignore_virtual=False)
@@ -690,6 +698,9 @@ def get_pipeline_model_parallel_next_rank():
     assert _PIPELINE_GLOBAL_RANKS is not None, "Pipeline parallel group is not initialized"
     rank_in_pipeline = get_pipeline_model_parallel_rank()
     world_size = get_pipeline_model_parallel_world_size()
+    bd_rank = get_virtual_pipeline_model_parallel_rank()
+    if get_args().enable_bdv_schedule and bd_rank == 1:
+        return _PIPELINE_GLOBAL_RANKS[(rank_in_pipeline - 1) % world_size]
     return _PIPELINE_GLOBAL_RANKS[(rank_in_pipeline + 1) % world_size]
 
 
@@ -698,6 +709,9 @@ def get_pipeline_model_parallel_prev_rank():
     assert _PIPELINE_GLOBAL_RANKS is not None, "Pipeline parallel group is not initialized"
     rank_in_pipeline = get_pipeline_model_parallel_rank()
     world_size = get_pipeline_model_parallel_world_size()
+    bd_rank = get_virtual_pipeline_model_parallel_rank()
+    if get_args().enable_bdv_schedule and bd_rank == 1:
+        return _PIPELINE_GLOBAL_RANKS[(rank_in_pipeline + 1) % world_size]
     return _PIPELINE_GLOBAL_RANKS[(rank_in_pipeline - 1) % world_size]
 
 

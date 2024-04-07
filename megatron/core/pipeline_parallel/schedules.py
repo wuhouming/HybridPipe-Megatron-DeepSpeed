@@ -95,6 +95,12 @@ def get_forward_backward_func():
     collect_non_loss_data (optional, bool, default=False): TODO
 
     """
+    if get_args().enable_bdv_schedule:
+        from megatron.core.pipeline_parallel.bd_schedule import (
+            forward_backward_pipelining_with_bidirectional,
+        )
+
+        return forward_backward_pipelining_with_bidirectional
     pipeline_model_parallel_size = parallel_state.get_pipeline_model_parallel_world_size()
     if pipeline_model_parallel_size > 1:
         if parallel_state.get_virtual_pipeline_model_parallel_world_size() is not None:
@@ -152,7 +158,7 @@ def custom_backward(output, grad_output):
     Variable._execution_engine.run_backward(
         tensors = (output,),
         grad_tensors = (grad_output,),
-        keep_graph = False,
+        keep_graph = False, # False
         create_graph = False,
         inputs = tuple(),
         allow_unreachable=True,

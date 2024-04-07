@@ -174,6 +174,19 @@ def validate_args(args, defaults={}):
     else:
         args.virtual_pipeline_model_parallel_size = None
 
+    # TODO: validate more
+    if args.enable_bdv_schedule:
+        assert args.num_layers % args.transformer_pipeline_model_parallel_size == 0, \
+            'number of layers should be divisible by the pipeline parallel size'
+        num_layers_per_pipeline_stage = args.num_layers // args.transformer_pipeline_model_parallel_size
+        assert num_layers_per_pipeline_stage % 2 == 0, \
+            'bidirectional schedule requires number of layers per pipeline stage to be even'
+        assert args.num_layers_per_virtual_pipeline_stage is None, \
+            'num_layers_per_virtual_pipeline_stage should not be set with bidirectional v schedule'
+        args.virtual_pipeline_model_parallel_size = 2
+        args.num_layers_per_virtual_pipeline_stage = num_layers_per_pipeline_stage // 2
+        assert args.virtual_pipeline_model_parallel_size == 2
+
     # Parameters dtype.
     args.params_dtype = torch.float
     if args.fp16:
@@ -1175,6 +1188,9 @@ def _add_distributed_args(parser):
                        'affects the encoder embedding.)')
     group.add_argument('--use-distributed-optimizer', action='store_true',
                        help='Use distributed optimizer.')
+    group.add_argument('--enable-bdv-schedule', action='store_true',
+                       help='Use bidirectional pipeline.',
+                       dest='enable_bdv_schedule')
 
     return parser
 

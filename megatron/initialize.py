@@ -217,6 +217,10 @@ def _initialize_distributed():
             get_accelerator().set_device(device) # only do so when device_count > 0
 
     # Call the init process
+    # if args.enable_bdv_schedule:
+    #     print(f"init process group {args.rank} of {args.world_size}")
+    #     assert args.distributed_backend == "nccl"
+    #     backend = "cpu:gloo,cuda:nccl"
     if args.deepspeed or args.ds_inference:
         deepspeed.init_distributed()
     else:

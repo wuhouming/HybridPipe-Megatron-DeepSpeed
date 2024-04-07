@@ -1634,6 +1634,12 @@ class ParallelTransformer(MegatronModule):
             offset = parallel_state.get_virtual_pipeline_model_parallel_rank() * (
                 config.num_layers // config.virtual_pipeline_model_parallel_size) + \
                 (parallel_state.get_pipeline_model_parallel_rank() * self.num_layers)
+            if args.enable_bdv_schedule:
+                assert config.virtual_pipeline_model_parallel_size == 2
+                if parallel_state.get_virtual_pipeline_model_parallel_rank() == 0:
+                    offset = parallel_state.get_pipeline_model_parallel_rank() * self.num_layers
+                else:
+                    offset = config.num_layers - (parallel_state.get_pipeline_model_parallel_rank() + 1) * self.num_layers
         else:
             # Each stage gets a contiguous set of layers.
             if args.model_type == ModelType.encoder_and_decoder and \

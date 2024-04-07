@@ -15,10 +15,27 @@ _HALF_TYPES = [get_accelerator().HalfTensor(0).dtype]
 _BF16_TYPES = [get_accelerator().BFloat16Tensor(0).dtype]
 
 
-
 def param_is_not_shared(param):
     return not hasattr(param, 'shared') or not param.shared
 
+cache = {}
+used_key = set()
+
+
+def local_binary_reduction(param: torch.nn.parameter.Parameter, key):
+    assert param.grad is None
+    if key in cache:
+        cache[key].add_(param)
+        param.copy_(cache[key])
+        a = cache[key]
+        del cache[key]
+        used_key.add(key)
+        return {a, param}
+    else:
+        assert not (key in used_key)
+        assert len(cache) == 0, f"{cache.keys()}, {key}"
+        cache[key] = param
+        return None
 
 
 class MegatronModule(torch.nn.Module):
@@ -30,12 +47,10 @@ class MegatronModule(torch.nn.Module):
         self.config = config
         self.share_embeddings_and_output_weights = share_embeddings_and_output_weights
 
-
     def state_dict_for_save_checkpoint(self, prefix='', keep_vars=False):
         """Use this function to override the state dict for
         saving checkpoints."""
         return self.state_dict(prefix=prefix, keep_vars=keep_vars)
-
 
     def shared_embedding_or_output_weight(self):
         if self.pre_process:
@@ -45,7 +60,6 @@ class MegatronModule(torch.nn.Module):
                 raise Exception('shared_embedding_or_output_weight() called for last '
                                 'stage, but share_embeddings_and_output_weights is false')
             return self.word_embeddings.weight
-
 
     def initialize_word_embeddings(self):
         args = get_args()
@@ -100,9 +114,20 @@ class MegatronModule(torch.nn.Module):
 
         # Ensure that first and last stages have the same initial parameter
         # values.
+        # print(f'rank {torch.distributed.get_rank()} is in embedding group {mpu.is_rank_in_embedding_group()}')
         if mpu.is_rank_in_embedding_group():
-            torch.distributed.all_reduce(self.shared_embedding_or_output_weight().data,
-                                         group=mpu.get_embedding_group())
+            # torch.distributed.all_reduce(self.shared_embedding_or_output_weight().data,
+            #                              group=mpu.get_embedding_group())
+            if get_args().enable_bdv_schedule:
+                local_binary_reduction(
+                    self.shared_embedding_or_output_weight().data,
+                    key="embedding_initialization",
+                )
+            else:
+                torch.distributed.all_reduce(
+                    self.shared_embedding_or_output_weight().data,
+                    group=mpu.get_embedding_group(),
+                )
 
         # Ensure that encoder(first stage) and decoder(split stage) position
         # embeddings have the same initial parameter values
@@ -151,7 +176,6 @@ def float16_to_fp32(val):
             val = val.float()
         return val
     return conversion_helper(val, float_conversion)
-
 
 
 class Float16Module(MegatronModule):

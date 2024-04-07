@@ -18,6 +18,9 @@ from megatron.utils import unwrap_model
 
 from .clip_grads import clip_grad_norm_fp32, count_zeros_fp32
 from deepspeed.accelerator import get_accelerator
+from megatron import get_args
+
+embedding_grad_counter = 0
 
 def _zero_grad_group_helper(group, set_to_none):
     """Zero out the gradient for a group of parameters.
@@ -54,9 +57,7 @@ def _multi_tensor_copy_this_to_that(this, that, overflow_buf=None):
             that_.copy_(this_)
 
 
-
 class MegatronOptimizer(ABC):
-
 
     def __init__(self, optimizer, clip_grad,
                  log_num_zeros_in_grad,
@@ -81,14 +82,12 @@ class MegatronOptimizer(ABC):
             assert self.params_have_main_grad, \
                 "use of contiguous buffer requires that params have main grad"
 
-
     def get_parameters(self):
         params = []
         for param_group in self.optimizer.param_groups:
             for param in param_group['params']:
                 params.append(param)
         return params
-
 
     def get_main_grads_for_grad_norm(self):
 
@@ -108,11 +107,9 @@ class MegatronOptimizer(ABC):
 
         return grads_for_norm
 
-
     def get_model_parallel_group(self):
         """Default returned here, but the distributed optimizer overrides this."""
         return mpu.get_model_parallel_group()
-
 
     def clip_grad_norm(self, clip_grad):
         params = self.get_parameters()
@@ -121,28 +118,23 @@ class MegatronOptimizer(ABC):
             params, grads_for_norm, clip_grad,
             model_parallel_group=self.get_model_parallel_group())
 
-
     def count_zeros(self):
         params = self.get_parameters()
         return count_zeros_fp32(params,
                                 model_parallel_group=self.get_model_parallel_group())
 
-
     @abstractmethod
     def zero_grad(self, set_to_none=True):
         pass
-
 
     @abstractmethod
     def get_loss_scale(self):
         """The output should be a cuda tensor of size 1."""
         pass
 
-
     def scale_loss(self, loss):
         """Simple scaling."""
         return self.get_loss_scale() * loss
-
 
     @abstractmethod
     def reload_model_params(self):
@@ -153,16 +145,13 @@ class MegatronOptimizer(ABC):
         with main parameters, the main parameters need to also be updated."""
         pass
 
-
     @abstractmethod
     def state_dict(self):
         pass
 
-
     @abstractmethod
     def load_state_dict(self, state_dict):
         pass
-
 
     # Promote state so it can be retrieved or set via
     # "optimizer_instance.state"
@@ -173,7 +162,6 @@ class MegatronOptimizer(ABC):
         self.optimizer.state = value
 
     state = property(_get_state, _set_state)
-
 
     # Promote param_groups so it can be retrieved or set via
     # "optimizer_instance.param_groups"
@@ -186,11 +174,9 @@ class MegatronOptimizer(ABC):
 
     param_groups = property(_get_param_groups, _set_param_groups)
 
-
     @abstractmethod
     def step(self, args, timers):
         pass
-
 
     def gather_model_params(self, args, timers):
         """
@@ -198,7 +184,6 @@ class MegatronOptimizer(ABC):
         do here.
         """
         pass
-
 
     def allreduce_word_embedding_grads(self, args):
         """
@@ -208,12 +193,14 @@ class MegatronOptimizer(ABC):
         parameters stay in sync. This should only run for models that support
         pipelined model parallelism (BERT and GPT-2).
         """
-
-        if mpu.is_rank_in_embedding_group(ignore_virtual=True) and \
-                mpu.get_pipeline_model_parallel_world_size() > 1:
-            if mpu.is_pipeline_first_stage(ignore_virtual=True):
+        ignore_virtual = not get_args().enable_bdv_schedule
+        if (
+            mpu.is_rank_in_embedding_group(ignore_virtual=ignore_virtual)
+            and mpu.get_pipeline_model_parallel_world_size() > 1
+        ):
+            if mpu.is_pipeline_first_stage(ignore_virtual=ignore_virtual):
                 unwrapped_model = self.models[0]
-            elif mpu.is_pipeline_last_stage(ignore_virtual=True):
+            elif mpu.is_pipeline_last_stage(ignore_virtual=ignore_virtual):
                 unwrapped_model = self.models[-1]
             else:  # We do not support the interleaved schedule for T5 yet.
                 unwrapped_model = self.models[0]
@@ -222,12 +209,19 @@ class MegatronOptimizer(ABC):
 
             if unwrapped_model.share_embeddings_and_output_weights:
                 weight = unwrapped_model.shared_embedding_or_output_weight()
-                if args.DDP_impl == 'local':
-                    grad = weight.main_grad
+                # if args.DDP_impl == 'local':
+                #     grad = weight.main_grad
+                # else:
+                #     grad = weight.grad
+                # torch.distributed.all_reduce(grad, group=mpu.get_embedding_group())
+                grad = weight.main_grad
+                if get_args().enable_bdv_schedule:
+                    from megatron.model.module import local_binary_reduction
+                    global embedding_grad_counter
+                    local_binary_reduction(grad.data, key=f"embedding_grads_{int(embedding_grad_counter // 2)}")
+                    embedding_grad_counter += 1
                 else:
-                    grad = weight.grad
-                torch.distributed.all_reduce(grad, group=mpu.get_embedding_group())
-
+                    torch.distributed.all_reduce(grad, group=mpu.get_embedding_group())
 
     def allreduce_position_embedding_grads(self, args):
         """
@@ -247,12 +241,10 @@ class MegatronOptimizer(ABC):
             grad = unwrapped_model.language_model.embedding.position_embeddings.weight.main_grad
             torch.distributed.all_reduce(grad, group=mpu.get_position_embedding_group())
 
-
     def allreduce_embedding_grads(self, args):
         """All-reduce both word and position embeddings."""
         self.allreduce_word_embedding_grads(args)
         self.allreduce_position_embedding_grads(args)
-
 
     def allreduce_layernorm_grads(self, args):
         """All-reduce layernorm grads (for sequence parallelism)."""
@@ -275,7 +267,6 @@ class MegatronOptimizer(ABC):
             for buf, synced in zip(grads, _unflatten_dense_tensors(
                     coalesced, grads)):
                 buf.copy_(synced)
-
 
     def reduce_model_grads(self, args, timers):
         """All-reduce all grads, and all-reduce embeddings."""

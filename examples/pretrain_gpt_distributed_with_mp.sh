@@ -3,19 +3,22 @@
 # Runs the "345M" parameter model
 
 export CUDA_DEVICE_MAX_CONNECTIONS=1
-
-GPUS_PER_NODE=8
+export CUDA_VISIBLE_DEVICES=0,4,5,6
+export NCCL_P2P_LEVEL=NVL
+export NCCL_DEBUG=INFO
+# export NCCL_P2P_DISABLE=1
+export NCCL_IB_DISABLE=1
+GPUS_PER_NODE=4
 # Change for multinode config
 MASTER_ADDR=localhost
 MASTER_PORT=6000
 NNODES=1
 NODE_RANK=0
 WORLD_SIZE=$(($GPUS_PER_NODE*$NNODES))
-
-CHECKPOINT_PATH=<Specify path>
-VOCAB_FILE=<Specify path to file>/gpt2-vocab.json
-MERGE_FILE=<Specify path to file>/gpt2-merges.txt
-DATA_PATH=<Specify path and file prefix>_text_document
+CHECKPOINT_PATH=/data/gpt2-openwebtext-data/gpt2_test
+VOCAB_FILE=/data/gpt2-openwebtext-data/gpt2-vocab.json
+MERGE_FILE=/data/gpt2-openwebtext-data/gpt2-merges.txt
+DATA_PATH=/data/gpt2-openwebtext-data/my-gpt2_text_document
 
 DISTRIBUTED_ARGS="
     --nproc_per_node $GPUS_PER_NODE \
@@ -24,14 +27,16 @@ DISTRIBUTED_ARGS="
     --master_addr $MASTER_ADDR \
     --master_port $MASTER_PORT
 "
-
+#    --num-layers-per-bidirectional-pipeline-stage 3 \
+#    --num-layers-per-virtual-pipeline-stage 3 \
+#    --sequence-parallel \
+#    --enable-bdv-schedule \
 GPT_ARGS="
-    --tensor-model-parallel-size 2 \
-    --pipeline-model-parallel-size 2 \
-    --sequence-parallel \
-    --num-layers 24 \
-    --hidden-size 1024 \
-    --num-attention-heads 16 \
+    --pipeline-model-parallel-size 4 \
+    --enable-bdv-schedule \
+    --num-layers 16 \
+    --hidden-size 768 \
+    --num-attention-heads 12 \
     --seq-length 1024 \
     --max-position-embeddings 1024 \
     --micro-batch-size 4 \
@@ -56,7 +61,7 @@ DATA_ARGS="
 "
 
 OUTPUT_ARGS="
-    --log-interval 100 \
+    --log-interval 50 \
     --save-interval 10000 \
     --eval-interval 1000 \
     --eval-iters 10

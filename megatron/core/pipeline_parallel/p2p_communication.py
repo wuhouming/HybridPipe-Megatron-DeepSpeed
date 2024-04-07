@@ -12,6 +12,7 @@ from megatron.core.parallel_state import (
     get_pipeline_model_parallel_rank,
     get_pipeline_model_parallel_prev_rank,
     get_pipeline_model_parallel_next_rank,
+    get_virtual_pipeline_model_parallel_rank,
 )
 
 from megatron.core import ModelParallelConfig
@@ -115,29 +116,46 @@ def _batched_p2p_ops(*,
                      tensor_recv_next: Optional[torch.Tensor],
                      group: torch.distributed.ProcessGroup):
     ops = []
+    # printrank = 3
     if tensor_send_prev is not None:
         send_prev_op = torch.distributed.P2POp(
             torch.distributed.isend, tensor_send_prev,
             get_pipeline_model_parallel_prev_rank(),
             group)
+        # if get_pipeline_model_parallel_rank() == printrank:
+        #     print(
+        #         f"[{get_pipeline_model_parallel_rank()}] send prev [{get_pipeline_model_parallel_prev_rank()}] vir[{get_virtual_pipeline_model_parallel_rank()}]"
+        #     )
         ops.append(send_prev_op)
     if tensor_recv_prev is not None:
         recv_prev_op = torch.distributed.P2POp(
             torch.distributed.irecv, tensor_recv_prev,
             get_pipeline_model_parallel_prev_rank(),
             group)
+        # if get_pipeline_model_parallel_rank() == printrank:
+        #     print(
+        #         f"[{get_pipeline_model_parallel_rank()}] recv prev [{get_pipeline_model_parallel_prev_rank()}] vir[{get_virtual_pipeline_model_parallel_rank()}]"
+        #     )
         ops.append(recv_prev_op)
     if tensor_send_next is not None:
         send_next_op = torch.distributed.P2POp(
             torch.distributed.isend, tensor_send_next,
             get_pipeline_model_parallel_next_rank(),
             group)
+        # if get_pipeline_model_parallel_rank() == printrank:
+        #     print(
+        #         f"[{get_pipeline_model_parallel_rank()}] send next [{get_pipeline_model_parallel_next_rank()}] vir[{get_virtual_pipeline_model_parallel_rank()}]"
+        #     )
         ops.append(send_next_op)
     if tensor_recv_next is not None:
         recv_next_op = torch.distributed.P2POp(
             torch.distributed.irecv, tensor_recv_next,
             get_pipeline_model_parallel_next_rank(),
             group)
+        # if get_pipeline_model_parallel_rank()==printrank:
+        #     print(
+        #         f"[{get_pipeline_model_parallel_rank()}] recv next [{get_pipeline_model_parallel_next_rank()}] vir[{get_virtual_pipeline_model_parallel_rank()}]"
+        #     )
         ops.append(recv_next_op)
     if len(ops) > 0:
         reqs = torch.distributed.batch_isend_irecv(ops)
@@ -492,6 +510,61 @@ def send_forward_recv_forward(output_tensor: torch.Tensor,
     return input_tensor
 
 
+def send_forward_recv_forward_bd0(output_tensor: torch.Tensor,
+                              recv_next: bool,
+                              tensor_shape: Shape,
+                              config: ModelParallelConfig,
+                              overlap_p2p_comm: bool = False) -> torch.Tensor:
+    """Batched recv from previous rank and send to next rank in pipeline.
+
+    See _communicate for argument details.
+    """
+    if config.timers is not None:
+        config.timers('forward-send-forward-recv', log_level=2).start()
+    _, input_tensor, wait_handles = _communicate(
+        tensor_send_next=output_tensor,
+        tensor_send_prev=None,
+        recv_prev=False,
+        recv_next=recv_next,
+        tensor_shape=tensor_shape,
+        wait_on_reqs=(not overlap_p2p_comm),
+        config=config)
+    if config.timers is not None:
+        config.timers('forward-send-forward-recv').stop()
+    if overlap_p2p_comm:
+        return input_tensor, wait_handles
+    return input_tensor
+
+
+def send_forward_recv_forward_bd1(
+    output_tensor: torch.Tensor,
+    recv_prev: bool,
+    tensor_shape: Shape,
+    config: ModelParallelConfig,
+    overlap_p2p_comm: bool = False,
+) -> torch.Tensor:
+    """Batched recv from previous rank and send to next rank in pipeline.
+
+    See _communicate for argument details.
+    """
+    if config.timers is not None:
+        config.timers("forward-send-forward-recv", log_level=2).start()
+    input_tensor, _, wait_handles = _communicate(
+        tensor_send_next=None,
+        tensor_send_prev=output_tensor,
+        recv_prev=recv_prev,
+        recv_next=False,
+        tensor_shape=tensor_shape,
+        wait_on_reqs=(not overlap_p2p_comm),
+        config=config,
+    )
+    if config.timers is not None:
+        config.timers("forward-send-forward-recv").stop()
+    if overlap_p2p_comm:
+        return input_tensor, wait_handles
+    return input_tensor
+
+
 def send_backward_recv_backward(input_tensor_grad: torch.Tensor,
                                 recv_next: bool,
                                 tensor_shape: Shape,
@@ -513,6 +586,61 @@ def send_backward_recv_backward(input_tensor_grad: torch.Tensor,
         config=config)
     if config.timers is not None:
         config.timers('backward-send-backward-recv').stop()
+    if overlap_p2p_comm:
+        return output_tensor_grad, wait_handles
+    return output_tensor_grad
+
+
+def send_backward_recv_backward_bd(input_tensor_grad: torch.Tensor,
+                                recv_prev: bool,
+                                tensor_shape: Shape,
+                                config: ModelParallelConfig,
+                                overlap_p2p_comm: bool = False) -> torch.Tensor:
+    """Batched recv from next rank and send to previous rank in pipeline.
+
+    See _communicate for argument details.
+    """
+    if config.timers is not None:
+        config.timers('backward-send-backward-recv', log_level=2).start()
+    output_tensor_grad, _, wait_handles = _communicate(
+        tensor_send_next=None,
+        tensor_send_prev=input_tensor_grad,
+        recv_prev=recv_prev,
+        recv_next=False,
+        tensor_shape=tensor_shape,
+        wait_on_reqs=(not overlap_p2p_comm),
+        config=config)
+    if config.timers is not None:
+        config.timers('backward-send-backward-recv').stop()
+    if overlap_p2p_comm:
+        return output_tensor_grad, wait_handles
+    return output_tensor_grad
+
+
+def send_backward_recv_backward_bd1(
+    input_tensor_grad: torch.Tensor,
+    recv_next: bool,
+    tensor_shape: Shape,
+    config: ModelParallelConfig,
+    overlap_p2p_comm: bool = False,
+) -> torch.Tensor:
+    """Batched recv from next rank and send to previous rank in pipeline.
+
+    See _communicate for argument details.
+    """
+    if config.timers is not None:
+        config.timers("backward-send-backward-recv", log_level=2).start()
+    _, output_tensor_grad, wait_handles = _communicate(
+        tensor_send_next=input_tensor_grad,
+        tensor_send_prev=None,
+        recv_prev=False,
+        recv_next=recv_next,
+        tensor_shape=tensor_shape,
+        wait_on_reqs=(not overlap_p2p_comm),
+        config=config,
+    )
+    if config.timers is not None:
+        config.timers("backward-send-backward-recv").stop()
     if overlap_p2p_comm:
         return output_tensor_grad, wait_handles
     return output_tensor_grad
@@ -541,4 +669,88 @@ def send_forward_backward_recv_forward_backward(
         config=config)
     if config.timers is not None:
         config.timers('forward-backward-send-forward-backward-recv').stop()
+    return input_tensor, output_tensor_grad
+
+
+def send_forward_backward_recv_forward_backward_bd(
+        output_tensor: torch.Tensor,
+        input_tensor_grad: torch.Tensor,
+        recv_prev: bool,
+        recv_next: bool,
+        tensor_shape: Shape,
+        config: ModelParallelConfig) -> torch.Tensor:
+    """Batched send and recv with previous and next ranks in pipeline.
+
+    See _communicate for argument details.
+    """
+    if config.timers is not None:
+        config.timers('forward-backward-send-forward-backward-recv',
+               log_level=2).start()
+    output_tensor_grad,input_tensor,  _ = _communicate(
+        tensor_send_next=output_tensor,
+        tensor_send_prev=input_tensor_grad,
+        recv_prev=recv_prev,
+        recv_next=recv_next,
+        tensor_shape=tensor_shape,
+        config=config)
+    if config.timers is not None:
+        config.timers('forward-backward-send-forward-backward-recv').stop()
+    return input_tensor, output_tensor_grad
+
+
+def send_forward_backward_recv_forward_backward_bd1(
+    output_tensor: torch.Tensor,
+    input_tensor_grad: torch.Tensor,
+    recv_prev: bool,
+    recv_next: bool,
+    tensor_shape: Shape,
+    config: ModelParallelConfig,
+) -> torch.Tensor:
+    """Batched send and recv with previous and next ranks in pipeline.
+
+    See _communicate for argument details.
+    """
+    if config.timers is not None:
+        config.timers(
+            "forward-backward-send-forward-backward-recv", log_level=2
+        ).start()
+    input_tensor, output_tensor_grad, _ = _communicate(
+        tensor_send_next=input_tensor_grad,
+        tensor_send_prev=output_tensor,
+        recv_prev=recv_prev,
+        recv_next=recv_next,
+        tensor_shape=tensor_shape,
+        config=config,
+    )
+    if config.timers is not None:
+        config.timers("forward-backward-send-forward-backward-recv").stop()
+    return input_tensor, output_tensor_grad
+
+
+def send_forward_backward_recv_forward_backward_bd2(
+    output_tensor: torch.Tensor,
+    input_tensor_grad: torch.Tensor,
+    recv_prev: bool,
+    recv_next: bool,
+    tensor_shape: Shape,
+    config: ModelParallelConfig,
+) -> torch.Tensor:
+    """Batched send and recv with previous and next ranks in pipeline.
+
+    See _communicate for argument details.
+    """
+    if config.timers is not None:
+        config.timers(
+            "forward-backward-send-forward-backward-recv", log_level=2
+        ).start()
+    output_tensor_grad, input_tensor, _ = _communicate(
+        tensor_send_next=input_tensor_grad,
+        tensor_send_prev=output_tensor,
+        recv_prev=recv_prev,
+        recv_next=recv_next,
+        tensor_shape=tensor_shape,
+        config=config,
+    )
+    if config.timers is not None:
+        config.timers("forward-backward-send-forward-backward-recv").stop()
     return input_tensor, output_tensor_grad

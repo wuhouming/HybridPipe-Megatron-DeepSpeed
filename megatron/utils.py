@@ -337,10 +337,10 @@ def dump_weights(preamble, iteration, model, optimizer, tensor=None):
     fn = f"debug-bf16-{iteration}-pp{pp_rank}-tp{tp_rank}-dp{dp_rank}-{preamble}.txt"
 
     # only care for first and last pp stages and dp0 tp0
-    #if not (mpu.is_pipeline_first_stage() or mpu.is_pipeline_last_stage()):
+    # if not (mpu.is_pipeline_first_stage() or mpu.is_pipeline_last_stage()):
     #    return
 
-    #if not (tp_rank == 0 and dp_rank == 0):
+    # if not (tp_rank == 0 and dp_rank == 0):
     #    return
 
     if tensor is not None:
@@ -349,7 +349,7 @@ def dump_weights(preamble, iteration, model, optimizer, tensor=None):
             numel = tensor._hp_param.numel() # // dp_size
             tensor = tensor.flatten().narrow(0, 0, numel)
 
-    #print(fn)
+    # print(fn)
     with open(fn, "w") as fh:
         fh.write(f"{get_fingerprint_header()}\n")
 
@@ -359,9 +359,7 @@ def dump_weights(preamble, iteration, model, optimizer, tensor=None):
             for n, p in model[0].named_parameters():
                 fh.write(f"{get_fingerprint(p)} {n} {p.shape}\n")
 
-
     return
-
 
     # until we figure out how to dump the actual fp32 values don't do this
     fn = f"debug-fp32-{iteration}-pp{pp_rank}-tp{tp_rank}-dp{dp_rank}-{preamble}.txt"
@@ -371,13 +369,19 @@ def dump_weights(preamble, iteration, model, optimizer, tensor=None):
             tensor = orig_tensor
             if hasattr(tensor, "_hp_param"):
                 fh.write(f"{get_fingerprint(tensor._hp_param)} tensor {tensor._hp_param.shape}\n")
-                #fh.write(f"{get_fingerprint(tensor._hp_grad)} tensor grad\n")
+                # fh.write(f"{get_fingerprint(tensor._hp_grad)} tensor grad\n")
             else:
                 fh.write(f"{get_fingerprint(tensor)} tensor {tensor.shape}\n")
-                #fh.write(f"{get_fingerprint(tensor.grad)} tensor grad\n")
+                # fh.write(f"{get_fingerprint(tensor.grad)} tensor grad\n")
 
         else:
             if hasattr(model[0].module.tied_modules, "embed"):
                 p = model[0].module.tied_modules.embed.word_embeddings.weight._hp_param
                 fh.write(f"{get_fingerprint(p)} module.tied_modules.embed.word_embeddings.weight._hp_param {p.shape}\n")
 
+
+def is_pipeline_stage_containing_loss():
+    if get_args().enable_bdv_schedule:
+        return mpu.is_pipeline_first_stage(ignore_virtual=True)
+    else:
+        return mpu.is_pipeline_last_stage(ignore_virtual=True)

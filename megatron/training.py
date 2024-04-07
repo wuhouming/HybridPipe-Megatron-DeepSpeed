@@ -36,6 +36,7 @@ from megatron.optimizer_param_scheduler import OptimizerParamScheduler
 from megatron.model import DistributedDataParallel as LocalDDP
 from megatron.utils import check_adlr_autoresume_termination
 from megatron.utils import unwrap_model
+from megatron.utils import is_pipeline_stage_containing_loss
 from megatron.data.data_samplers import build_pretraining_data_loader
 from megatron.utils import calc_params_l2_norm
 from megatron.core.pipeline_parallel import get_forward_backward_func
@@ -82,7 +83,7 @@ def _create_ds_config_dict():
     args.deepspeed_config = None 
 
     return ds_config_dict
-    
+
 
 def pretrain(train_valid_test_dataset_provider,
              model_provider,
@@ -655,7 +656,6 @@ def setup_model_and_optimizer(model_provider_func,
     return model, optimizer, opt_param_scheduler
 
 
-
 def train_step(forward_step_func, data_iterator,
                model, optimizer, opt_param_scheduler, config):
     """Single training step."""
@@ -769,7 +769,8 @@ def train_step(forward_step_func, data_iterator,
         if args.empty_unused_memory_level >= 2:
             torch.cuda.empty_cache()
 
-        if mpu.is_pipeline_last_stage(ignore_virtual=True):
+        if is_pipeline_stage_containing_loss():
+        # if mpu.is_pipeline_last_stage(ignore_virtual=True):
             # Average loss across microbatches.
             loss_reduced = {}
             for key in losses_reduced[0]:
@@ -1124,7 +1125,11 @@ def training_log(loss_dict, total_loss_dict, learning_rate, iteration,
         total_loss_dict[advanced_iters_key] = 0
         total_loss_dict[skipped_iters_key] = 0
         total_loss_dict[nan_iters_key] = 0
-        print_rank_last(log_string)
+        # print_rank_last(log_string)
+        if get_args().enable_bdv_schedule:
+            print_rank_0(log_string)
+        else:
+            print_rank_last(log_string)
         if report_memory_flag and learning_rate > 0.:
             # Report memory after optimizer state has been initialized.
             report_memory('(after {} iterations)'.format(iteration))
@@ -1372,7 +1377,8 @@ def evaluate(forward_step_func,
             if args.empty_unused_memory_level >= 1:
                 torch.cuda.empty_cache()
 
-            if mpu.is_pipeline_last_stage(ignore_virtual=True):
+            # if mpu.is_pipeline_last_stage(ignore_virtual=True):
+            if is_pipeline_stage_containing_loss():
                 # Reduce across processes.
                 for loss_dict in loss_dicts:
                     for key in loss_dict:
